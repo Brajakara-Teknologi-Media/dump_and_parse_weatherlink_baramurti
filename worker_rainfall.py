@@ -2,7 +2,9 @@ import os
 import requests
 from dotenv import load_dotenv
 import json
-from datetime import datetime, timezone, timedelta
+# Perhatikan: timezone di-import tetapi tidak digunakan secara eksplisit, 
+# menggunakan datetime.now() yang naive sesuai permintaan.
+from datetime import datetime, timezone, timedelta 
 import time
 import sys 
 import psycopg2
@@ -27,6 +29,41 @@ ENV_VARS_TO_CHECK = [
     "DB_USER",
     "DB_PASSWORD",
 ]
+
+def calculate_sleep_time(interval_minutes=5):
+    """
+    Menghitung durasi sleep yang dibutuhkan untuk mencapai menit presisi berikutnya.
+    Ini adalah mekanisme anti-time drift, menggunakan waktu Naive/Lokal container.
+    """
+    now = datetime.now() # <-- Menggunakan waktu Naive/Lokal container
+    
+    # Menghitung target menit berikutnya (kelipatan interval_minutes)
+    target_minute = (now.minute // interval_minutes) * interval_minutes + interval_minutes
+    
+    target_time = None
+    if target_minute >= 60:
+        # Pindah ke jam berikutnya pada menit 00
+        target_minute = 0
+        target_hour = now.hour + 1
+        
+        if target_hour >= 24:
+            # Target 00:00 hari berikutnya
+            target_time = datetime(now.year, now.month, now.day, 0, 0, 0) + timedelta(days=1)
+        else:
+            # Target 00 menit jam berikutnya
+            target_time = datetime(now.year, now.month, now.day, target_hour, 0, 0)
+    else:
+        # Target menit kelipatan 5 di jam yang sama
+        target_time = datetime(now.year, now.month, now.day, now.hour, target_minute, 0)
+
+    # Menghitung selisih waktu
+    sleep_seconds = (target_time - now).total_seconds()
+    
+    # Jika sudah terlambat (sleep_seconds < 1), tunggu 5 menit penuh untuk siklus berikutnya
+    if sleep_seconds < 1: 
+         sleep_seconds = interval_minutes * 60 
+
+    return sleep_seconds, target_time
 
 def load_check_env():
     """Cek .env kali aja kosong"""
@@ -195,6 +232,7 @@ def save_failover_cumulative(data_list, error_type="UNKNOWN_FATAL"):
         print(YELLOW + f"⚠️ Data kumulatif ({len(data_list)} item) dialihkan ke file failover: {filename}" + RESET)
     except Exception as e:
         print(RED + f"❌ Gagal menyimpan file failover kumulatif {filename}: {e}" + RESET, file=sys.stderr)
+        sys.exit(1)
 
 
 def process_data(raw_filtered_data, station_id, sensor_id):
@@ -208,17 +246,19 @@ def process_data(raw_filtered_data, station_id, sensor_id):
     datetime_utc = None 
     
     # 🆕 Tambahkan waktu eksekusi saat ini untuk keperluan Failover JSON
-    created_at_ts = datetime.now(timezone.utc) 
+    # Menggunakan datetime.now() yang naive (sesuai permintaan user)
+    created_at_ts = datetime.now() 
 
     try:
         # BLOK KONVERSI WAKTU DATA API (ts_tz)
         if timestamp_unix is not None:
-            # Konversi UNIX timestamp ke datetime objek
+            # Konversi UNIX timestamp ke datetime objek (Default dari_timestamp adalah Naive, akan diinterpretasikan PostGRES)
             datetime_utc = datetime.fromtimestamp(timestamp_unix, tz=timezone.utc)
             
     except (TypeError, ValueError, AttributeError) as e:
         print(RED + f"❌ Konversi Timestamp Gagal: {e}" + RESET, file=sys.stderr)
-        pass 
+        # 🛑 EXIT: Gagal memproses data adalah kegagalan fatal dalam siklus tunggal.
+        sys.exit(1) 
 
 
     piece_final = {
@@ -250,32 +290,33 @@ def fetch_api(baseURL, apiKey, secretKey, stationID, sensorID):
         response.raise_for_status()
         raw_data = response.json()
 
-        # Cari sensor yang sesuai
+        # Cari sensor yang sesuai (Filtering Code)
         filtered_data = None
         for sensor in raw_data.get("sensors", []):
             if sensor.get("lsid") == sensorID:
                 if sensor.get("data"):
-                    # Mengambil dictionary pertama dari list "data"
                     filtered_data = sensor["data"][0]
                     break
                     
         if not filtered_data:
             print(f"⚠️ Peringatan: data sensor {sensorID} tidak ditemukan atau datanya kosong.")
-            return None
-        
+            return None # <--- TIDAK CRASH: API OK, tapi data sensor kosong
+
         print(f"✅ Data sensor {sensorID} berhasil difilter.")
         return filtered_data
 
     except requests.exceptions.HTTPError as err:
-        print(RED + f"❌ HTTP Error: {err}" + RESET, file=sys.stderr) 
-        print(f"URL Request Gagal: {response.url}")
-        return None
+        # 🛑 EXIT: HTTP Error (4xx, 5xx)
+        print(RED + f"❌ HTTP Error: {err}. Memicu restart Docker." + RESET, file=sys.stderr) 
+        sys.exit(1) 
     except requests.exceptions.RequestException as err:
-        print(RED + f"❌ Error Jaringan: {err}" + RESET, file=sys.stderr)
-        return None
+        # 🛑 EXIT: Error Jaringan (Timeout, DNS, dll.)
+        print(RED + f"❌ Error Jaringan: {err}. Memicu restart Docker." + RESET, file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(RED + f"❌ Error tak terduga saat fetch: {e}" + RESET, file=sys.stderr)
-        return None
+        # 🛑 EXIT: Error Tak Terduga saat request/parsing
+        print(RED + f"❌ Error tak terduga saat fetch: {e}. Memicu restart Docker." + RESET, file=sys.stderr)
+        sys.exit(1)
         
 #================================================
 #               FUNGSI SIKLUS INTI
@@ -288,7 +329,7 @@ def worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, d
     """
     final_processed_data = None
     
-    # 1. FETCH DATA
+    # 1. FETCH DATA (Kegagalan di sini sudah exit di fungsi fetch_api)
     raw_filtered_data = fetch_api(
         baseURL=base_url, 
         apiKey=api_key,
@@ -298,10 +339,10 @@ def worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, d
     )
 
     if not raw_filtered_data:
-        print(YELLOW + "⚠️ Fetch API gagal atau data kosong. Skip insert." + RESET)
+        print(YELLOW + "⚠️ Fetch API berhasil, tapi data kosong. Skip insert." + RESET)
         return None
         
-    # 2. PROSES DATA
+    # 2. PROSES DATA (Kegagalan di sini sudah exit di fungsi process_data)
     final_processed_data = process_data(raw_filtered_data, station_id, sensor_id)
     
     # 3. INSERT DATA KE DB
@@ -312,9 +353,14 @@ def worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, d
         # Jika insert gagal dan BUKAN karena data sudah ada, catat sebagai failover item tunggal
         if not insert_success and final_processed_data.get("ts_tz") != "Konversi Gagal":
             save_failover_json(final_processed_data, error_type="DB_INSERT_FAIL")
+            # 🛑 EXIT: Insert gagal fatal harus memicu restart Docker
+            sys.exit(1) 
+            
     else:
         # Koneksi DB hilang/gagal
-        raise Exception("NO_DB_CONNECTION")
+        # 🛑 EXIT: Koneksi DB tidak tersedia
+        print(RED + "❌ ERROR FATAL: Koneksi DB tidak tersedia saat siklus inti." + RESET, file=sys.stderr)
+        sys.exit(1) # <-- Memicu restart Docker Compose
         
     return final_processed_data
 
@@ -322,181 +368,36 @@ def worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, d
 #               FUNGSI RUNNER (MODE EKSEKUSI)
 #================================================
 
-def worker_loop(base_url, api_key, x_api_secret, station_id, sensor_id, db_host, db_port, db_name, db_user, db_password, delay_seconds=60):
-    """
-    [Runner Looping Selamanya] Mengulang siklus secara terus menerus, menyimpan cache data.
-    """
+def run_worker_app(delay_minutes=5):
+    """Fungsi utama looping dengan mekanisme Time-Aware dan fault tolerance."""
     
-    processed_data_cache = [] # Cache untuk Failover Kumulatif
+    # Menggunakan datetime.now() yang Naive/Lokal container
+    print(GREEN + f"[{datetime.now()}] Worker mode Time-Aware aktif. Interval: {delay_minutes} menit." + RESET)
     
-    db_conn = create_db_connection(db_host, db_port, db_name, db_user, db_password)
-    if db_conn is None:
-        print(RED + "❌ Worker berhenti karena koneksi DB awal gagal." + RESET, file=sys.stderr)
-        sys.exit(1)
-
     while True:
-        final_processed_data = None
-        
         try:
-            print("\n--- Worker Cycle Mulai ---")
+            # 1. Jalankan logika inti worker (fetch & insert)
+            print(f"[{datetime.now()}] 🔄 Memulai siklus pada kelipatan 5 menit...")
             
-            # Cek dan coba reconnect DB
-            if db_conn.closed:
-                 print(YELLOW + "⚠️ Koneksi DB terputus, mencoba sambungkan kembali..." + RESET)
-                 db_conn = create_db_connection(db_host, db_port, db_name, db_user, db_password)
-                 if db_conn is None:
-                     raise Exception("DB_RECONNECT_FAIL") 
+            # run_worker_single_cycle akan memanggil sys.exit(1) jika ada error fatal
+            run_worker_single_cycle()
             
-            # Panggil logika inti
-            final_processed_data = worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, db_conn)
+            # 2. Hitung waktu yang tersisa untuk tidur (Mekanisme anti-drift)
+            time_to_wait, target_time = calculate_sleep_time(delay_minutes)
             
-            # 🆕 TAMBAHKAN DATA YANG BERHASIL DIPROSES KE CACHE
-            if final_processed_data:
-                processed_data_cache.append(final_processed_data)
-
+            print(YELLOW + f"[{datetime.now()}] Worker selesai. Menunggu {time_to_wait:.2f} detik untuk target {target_time.strftime('%H:%M:%S')}." + RESET)
+            time.sleep(time_to_wait)
+            
+        except SystemExit as e:
+            # 🛑 PENTING: Menangkap sys.exit(1) dari fungsi lain dan meneruskannya
+            print(RED + f"[{datetime.now()}] Worker secara sengaja keluar (exit 1). Memicu restart Docker." + RESET, file=sys.stderr)
+            raise e # Meneruskan SystemExit agar Docker me-restart
+            
         except Exception as e:
-            error_msg = str(e)
-            error_type = "GENERAL_ERROR"
-            
-            # Mendeteksi tipe error fatal untuk penamaan failover
-            if "DB_RECONNECT_FAIL" in error_msg or "NO_DB_CONNECTION" in error_msg or "psycopg2" in error_msg:
-                error_type = "DB_CONN_FAIL"
-            elif "HTTP Error" in error_msg or "Error Jaringan" in error_msg:
-                error_type = "API_FETCH_FAIL"
+            # 🛑 Menangani error Python lainnya (NameError, dll.)
+            print(RED + f"[{datetime.now()}] ❌ ERROR FATAL di loop utama: {e}. Worker CRASH." + RESET, file=sys.stderr)
+            raise e # Meneruskan Exception untuk menjamin container crash dan restart.
 
-            # 🛑 Tindakan Failover Kumulatif sebelum exit
-            if processed_data_cache:
-                save_failover_cumulative(processed_data_cache, error_type=error_type)
-            
-            # Data siklus terakhir yang sedang gagal juga dicatat sebagai failover item tunggal
-            if final_processed_data and "DB_INSERT_FAIL" not in error_type: 
-                 save_failover_json(final_processed_data, error_type=error_type)
-
-            print(RED + f"Worker dihentikan karena error fatal: {error_type}." + RESET, file=sys.stderr)
-            
-            if db_conn and not db_conn.closed:
-                db_conn.close()
-            
-            sys.exit(1)
-
-        finally:
-            # INTERVAL DELAY
-            print(f"\n--- Worker menunggu interval {delay_seconds/60:.2f} menit ({delay_seconds} detik)... ---")
-            time.sleep(delay_seconds)
-
-def run_worker_app(delay_minutes=1):
-    """
-    [Runner Looping] Fungsi utama untuk menjalankan worker SELAMANYA (Produksi).
-    """
-    delay_seconds = delay_minutes * 60 
-    
-    is_armed = load_check_env()
-    
-    if is_armed:
-        try:
-            base_url, api_key, x_api_secret, station_id , sensor_id, db_host, db_port, db_name, db_user, db_password = get_dotenv()
-        except ValueError as e:
-            print(RED + f"❌ Gagal mengambil variabel lingkungan: {e}" + RESET, file=sys.stderr)
-            sys.exit(1)
-            
-        if sensor_id is not None:
-            print(YELLOW + f"\n*** MEMULAI WORKER DENGAN INTERVAL {delay_minutes} MENIT (SELAMANYA) ***" + RESET)
-            worker_loop(
-                base_url, api_key, x_api_secret, station_id , sensor_id, 
-                db_host, db_port, db_name, db_user, db_password,
-                delay_seconds=delay_seconds
-            )
-        else:
-             print(RED + "⚠️ Gagal menjalankan worker: TARGET_LSID bukan angka atau kosong." + RESET, file=sys.stderr)
-             sys.exit(1)
-    else:
-        print(RED + "⚠️ Worker dihentikan: Konfigurasi ENV tidak lengkap." + RESET, file=sys.stderr)
-        sys.exit(1)
-
-def run_worker_limited_cycles(max_cycles=3, delay_minutes=1):
-    """
-    [Runner Terbatas] Menjalankan worker untuk sejumlah siklus tertentu, dengan cache failover.
-    """
-    delay_seconds = delay_minutes * 60 
-    
-    print(YELLOW + f"\n*** MEMULAI WORKER DALAM MODE TERBATAS ({max_cycles} SIKLUS @ {delay_minutes} MENIT) ***" + RESET)
-
-    is_armed = load_check_env()
-    
-    if not is_armed:
-        print(RED + "⚠️ Worker dihentikan: Konfigurasi ENV tidak lengkap." + RESET, file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        base_url, api_key, x_api_secret, station_id , sensor_id, db_host, db_port, db_name, db_user, db_password = get_dotenv()
-    except ValueError as e:
-        print(RED + f"❌ Gagal mengambil variabel lingkungan: {e}" + RESET, file=sys.stderr)
-        sys.exit(1)
-        
-    if sensor_id is None:
-        print(RED + "⚠️ Gagal menjalankan worker: TARGET_LSID bukan angka atau kosong." + RESET, file=sys.stderr)
-        sys.exit(1)
-
-    db_conn = create_db_connection(db_host, db_port, db_name, db_user, db_password)
-    if db_conn is None:
-        print(RED + "❌ Worker berhenti karena koneksi DB gagal." + RESET, file=sys.stderr)
-        sys.exit(1)
-        
-    processed_data_cache = [] # Cache untuk Failover Kumulatif
-        
-    # --- LOOP UTAMA TERBATAS ---
-    for cycle_num in range(1, max_cycles + 1):
-        final_processed_data = None
-        print(f"\n--- Worker Cycle Mulai (Siklus {cycle_num}/{max_cycles}) ---")
-        
-        try:
-            if db_conn.closed:
-                 print(YELLOW + "⚠️ Koneksi DB terputus, mencoba sambungkan kembali..." + RESET)
-                 db_conn = create_db_connection(db_host, db_port, db_name, db_user, db_password)
-                 if db_conn is None:
-                     raise Exception("DB_RECONNECT_FAIL") 
-            
-            final_processed_data = worker_cycle_logic(base_url, api_key, x_api_secret, station_id, sensor_id, db_conn)
-            
-            # 🆕 TAMBAHKAN DATA YANG BERHASIL DIPROSES KE CACHE
-            if final_processed_data:
-                processed_data_cache.append(final_processed_data)
-
-        except Exception as e:
-            error_msg = str(e)
-            error_type = "GENERAL_ERROR"
-            
-            # Mendeteksi tipe error fatal untuk penamaan failover
-            if "DB_RECONNECT_FAIL" in error_msg or "NO_DB_CONNECTION" in error_msg or "psycopg2" in error_msg:
-                error_type = "DB_CONN_FAIL"
-            elif "HTTP Error" in error_msg or "Error Jaringan" in error_msg:
-                error_type = "API_FETCH_FAIL"
-            
-            # 🛑 Tindakan Failover Kumulatif sebelum exit
-            if processed_data_cache:
-                save_failover_cumulative(processed_data_cache, error_type=error_type)
-            
-            # Data siklus terakhir yang sedang gagal juga dicatat
-            if final_processed_data and "DB_INSERT_FAIL" not in error_type:
-                 save_failover_json(final_processed_data, error_type=error_type)
-            
-            print(RED + f"\n❌ ERROR FATAL DITEMUKAN: {error_msg} (Tipe: {error_type}). Worker dihentikan." + RESET, file=sys.stderr)
-            
-            if db_conn and not db_conn.closed:
-                db_conn.close()
-            
-            sys.exit(1)
-
-        # INTERVAL DELAY (Hanya jika belum mencapai siklus terakhir)
-        if cycle_num < max_cycles:
-            print(f"\n--- Worker menunggu interval {delay_seconds/60:.2f} menit ({delay_seconds} detik)... ---")
-            time.sleep(delay_seconds)
-    
-    if db_conn and not db_conn.closed:
-        db_conn.close()
-        print(YELLOW + "Koneksi DB ditutup." + RESET)
-        
-    print(GREEN + f"\n*** Worker selesai menjalankan {max_cycles} siklus dan dihentikan. ***" + RESET)
 
 def run_worker_single_cycle():
     """
@@ -508,7 +409,9 @@ def run_worker_single_cycle():
     
     if not is_armed:
         print(RED + "⚠️ Worker dihentikan: Konfigurasi ENV tidak lengkap." + RESET, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(1) # 🛑 EXIT: Konfigurasi ENV
+        
+    # ... (Penanganan get_dotenv dan sensor_id) ...
 
     try:
         base_url, api_key, x_api_secret, station_id , sensor_id, db_host, db_port, db_name, db_user, db_password = get_dotenv()
@@ -524,7 +427,7 @@ def run_worker_single_cycle():
     db_conn = create_db_connection(db_host, db_port, db_name, db_user, db_password)
     if db_conn is None:
         print(RED + "❌ Single Cycle berhenti karena koneksi DB gagal." + RESET, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(1) # 🛑 EXIT: Gagal Koneksi DB Awal
         
     final_processed_data = None
     try:
@@ -542,7 +445,7 @@ def run_worker_single_cycle():
         # Jika ada data yang sempat diproses sebelum kegagalan, simpan sebagai failover item tunggal
         if final_processed_data:
             save_failover_json(final_processed_data, error_type=error_type) 
-        sys.exit(1)
+        sys.exit(1) # 🛑 EXIT: Semua exception tak terduga lainnya
     finally:
         if db_conn and not db_conn.closed:
             db_conn.close()
@@ -556,11 +459,14 @@ if __name__ == "__main__":
     
     # --- PUSAT KONTROL EKSEKUSI ---
     
+    if not load_check_env():
+        sys.exit(1) # 🛑 EXIT: Konfigurasi ENV di __main__
+
     # 1. PRODUKSI SELAMANYA:
-    #run_worker_app(delay_minutes=5) 
+    run_worker_app(delay_minutes=5) 
     
     # 2. SATU KALI RUN:
-    run_worker_single_cycle()
+    #run_worker_single_cycle()
     
     # 3. TEST TERBATAS (Misal: 5x dengan jeda 10 detik):
     # run_worker_limited_cycles(max_cycles=10, delay_minutes=15)

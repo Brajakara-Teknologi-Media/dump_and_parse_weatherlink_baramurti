@@ -1,28 +1,33 @@
+# File: docker-compose.yml
+
 version: "3.9"
 
 services:
-  # Nama service: Deskriptif untuk proyek Anda
+  # Service worker AWS Rainfall
   aws_rainfall_worker:
-    # Menggunakan Dockerfile di direktori root
+    # Menggunakan Dockerfile di direktori saat ini
     build: .
 
-    # Nama container yang akan muncul saat docker ps
+    # Nama container
     container_name: worker_current_rainfall
 
-    # Memuat variabel-variabel sensitif (DB, API Keys) dari .env
+    # Memuat semua variabel ENV dari file .env di direktori root
     env_file:
-      # Diasumsikan file ENV Anda di root adalah .env (bisa diganti jika nama file berbeda)
       - .env
 
-    # Volume: Memastikan failover_logs tetap ada di host
+    # Volume: Penting untuk menyimpan file failover_logs di host
+    # Ini memastikan log kegagalan tetap ada meskipun container di-restart/dibuang.
     volumes:
-      # Mapping folder failover_logs lokal ke /app/failover_logs di container
       - ./failover_logs:/app/failover_logs
 
-    # 💡 Perubahan 3: Mengatur command untuk menjalankan SUPERCRONIC
-    # Supercronic akan membaca crontab.txt dan menjalankan worker.py setiap 5 menit
-    command: ["supercronic", "crontab.txt"] 
+    # Perintah utama untuk menjalankan worker.py
+    # Ini akan menjalankan fungsi run_worker_app() yang berisi loop tak terbatas
+    command: ["python", "worker_rainfall.py"] 
 
-    # Kebijakan restart: Sangat penting untuk worker 24/7
-    # Secara otomatis me-restart jika Supercronic/worker crash
+    # Kebijakan restart KRITIS: 
+    # Secara otomatis me-restart jika container keluar dengan kode non-nol (sys.exit(1))
     restart: always
+
+    # Opsional: Jika Anda juga menjalankan DB, tambahkan ketergantungan
+    # depends_on:
+    #   - your_database_service
