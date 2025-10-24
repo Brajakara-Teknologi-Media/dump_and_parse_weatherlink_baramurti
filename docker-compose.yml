@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  # Nama service: Deskriptif untuk proyek Anda
+  aws_rainfall_worker:
+    # Menggunakan Dockerfile di direktori root
+    build: .
+
+    # Nama container yang akan muncul saat docker ps
+    container_name: worker_current_rainfall
+
+    # Memuat variabel-variabel sensitif (DB, API Keys) dari .env
+    env_file:
+      # Diasumsikan file ENV Anda di root adalah .env (bisa diganti jika nama file berbeda)
+      - .env
+
+    # Volume: Memastikan failover_logs tetap ada di host
+    volumes:
+      # Mapping folder failover_logs lokal ke /app/failover_logs di container
+      - ./failover_logs:/app/failover_logs
+
+    # Mengatur ulang command untuk menjalankan worker_rainfall.py secara langsung
+    # Baris ini menggantikan CMD di Dockerfile (jika ada) dan menjalankan worker loop
+    command: ["python", "worker_rainfall.py"] 
+
+    # Kebijakan restart: Sangat penting untuk worker 24/7
+    # Secara otomatis me-restart jika worker crash (exit code non-nol)
+    restart: always

@@ -1,0 +1,20 @@
+# Python Caches
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Dependencies (Virtual Environment)
+venv
+.venv
+env
+wcrenv
+*.egg-info/
+
+# Logs dan Failover (Tujuan mapping volume)
+failover_logs/
+*.log
+
+# Sensitive/Example Files
+.env
+example-env
