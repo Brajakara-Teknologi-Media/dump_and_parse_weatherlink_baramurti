@@ -1,0 +1,4 @@
+# Jadwal Cron untuk menjalankan worker_rainfall.py setiap 5 menit
+# (Tepat pada menit 0, 5, 10, 15, ..., 55 setiap jam)
+
+*/5 * * * * python /app/worker_rainfall.py

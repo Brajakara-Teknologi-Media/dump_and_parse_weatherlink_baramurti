@@ -19,10 +19,10 @@ services:
       # Mapping folder failover_logs lokal ke /app/failover_logs di container
       - ./failover_logs:/app/failover_logs
 
-    # Mengatur ulang command untuk menjalankan worker_rainfall.py secara langsung
-    # Baris ini menggantikan CMD di Dockerfile (jika ada) dan menjalankan worker loop
-    command: ["python", "worker_rainfall.py"] 
+    # 💡 Perubahan 3: Mengatur command untuk menjalankan SUPERCRONIC
+    # Supercronic akan membaca crontab.txt dan menjalankan worker.py setiap 5 menit
+    command: ["supercronic", "crontab.txt"] 
 
     # Kebijakan restart: Sangat penting untuk worker 24/7
-    # Secara otomatis me-restart jika worker crash (exit code non-nol)
+    # Secara otomatis me-restart jika Supercronic/worker crash
     restart: always

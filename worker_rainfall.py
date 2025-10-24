@@ -557,10 +557,10 @@ if __name__ == "__main__":
     # --- PUSAT KONTROL EKSEKUSI ---
     
     # 1. PRODUKSI SELAMANYA:
-    run_worker_app(delay_minutes=5) 
+    #run_worker_app(delay_minutes=5) 
     
     # 2. SATU KALI RUN:
-    #run_worker_single_cycle()
+    run_worker_single_cycle()
     
     # 3. TEST TERBATAS (Misal: 5x dengan jeda 10 detik):
     # run_worker_limited_cycles(max_cycles=10, delay_minutes=15)

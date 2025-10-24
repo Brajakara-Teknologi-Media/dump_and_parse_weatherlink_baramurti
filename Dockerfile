@@ -24,6 +24,8 @@ WORKDIR /app
 # Instal runtime dependencies minimal (musl-libc, dll.)
 RUN apk add --no-cache \
     ca-certificates coreutils bash \
+    # 💡 Perubahan 1: Tambahkan instalasi Supercronic
+    supercronic \
  && update-ca-certificates
 
 # Salin dependensi yang sudah terinstal dari stage builder
@@ -32,9 +34,11 @@ COPY --from=builder /install /usr/local
 # Salin script worker utama Anda
 COPY worker_rainfall.py .
 
+# 💡 Perubahan 2: Salin file jadwal Cron untuk Supercronic
+COPY crontab.txt .
+
 # Pastikan Python tidak melakukan buffering output (penting untuk log)
 ENV PYTHONUNBUFFERED=1
 
-# Perintah default untuk menjalankan worker
-# Ini menjalankan fungsi looping utama Anda: run_worker_app()
-CMD ["python", "worker_rainfall.py"]
+# Hapus CMD lama. Perintah eksekusi kini diatur oleh docker-compose.yml (lebih baik)
+# CMD ["python", "worker_rainfall.py"]
