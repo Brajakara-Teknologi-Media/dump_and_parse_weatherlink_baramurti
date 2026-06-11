@@ -34,7 +34,7 @@ COPY --from=builder /usr/local /usr/local
 
 # Salin script worker utama Anda
 COPY worker_rainfall.py .
-COPY .env .
+#COPY .env .
 
 # Pastikan Python tidak melakukan buffering output (penting untuk log real-time)
 ENV PYTHONUNBUFFERED=1
